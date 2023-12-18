@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"sync"
 
 	"github.com/datarhei/gosrt/internal/packet"
@@ -21,6 +22,8 @@ type PubSub interface {
 	// disconnects, io.EOF is returned. There can be an arbitrary number
 	// of subscribers.
 	Subscribe(c Conn) error
+
+	SubscribeData(w io.Writer) error
 }
 
 type packetReadWriter interface {
@@ -137,6 +140,37 @@ func (pb *pubSub) Publish(c Conn) error {
 	pb.cancel()
 
 	return err
+}
+
+func (pb *pubSub) SubscribeData(w io.Writer) error {
+	socketId := rand.Uint32()
+	l := make(chan packet.Packet, 1024)
+	pb.listenersLock.Lock()
+	pb.listeners[socketId] = l
+	pb.listenersLock.Unlock()
+
+	defer func() {
+		pb.listenersLock.Lock()
+		delete(pb.listeners, socketId)
+		pb.listenersLock.Unlock()
+	}()
+
+	for {
+		select {
+		case <-pb.ctx.Done():
+			return io.EOF
+		case p := <-l:
+			var err error
+			if !p.Header().IsControlPacket {
+				_, err = w.Write(p.Data())
+			}
+			p.Decommission()
+			if err != nil {
+				pb.logger.Print("pubsub:error", socketId, 1, func() string { return err.Error() })
+				return err
+			}
+		}
+	}
 }
 
 func (pb *pubSub) Subscribe(c Conn) error {
