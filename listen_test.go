@@ -394,12 +394,15 @@ func TestListenAsync(t *testing.T) {
 		pendingSet sync.Map // Set of which streams are pending
 		// All streams are connected
 		connectedWg sync.WaitGroup
+		// All listener goroutines are stopped
+		listenerWg sync.WaitGroup
 	)
+	listenerWg.Add(parallelCount)
 	pendingWg.Add(parallelCount)
 	connectedWg.Add(parallelCount)
 	for i := 0; i < parallelCount; i++ {
 		go func() {
-
+			defer listenerWg.Done()
 			for {
 				_, _, err := ln.Accept(func(req ConnRequest) ConnType {
 					// Only call Done() if we're the first request for this stream
@@ -430,4 +433,5 @@ func TestListenAsync(t *testing.T) {
 	// Wait for all streams to be connected
 	connectedWg.Wait()
 	ln.Close()
+	listenerWg.Wait()
 }
