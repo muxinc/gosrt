@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"sync"
@@ -185,6 +186,11 @@ type Listener interface {
 	Addr() net.Addr
 }
 
+type handshakeKey struct {
+	addr     net.Addr
+	socketId uint32
+}
+
 // listener implements the Listener interface.
 type listener struct {
 	pc   *net.UDPConn
@@ -192,9 +198,10 @@ type listener struct {
 
 	config Config
 
-	backlog chan connRequest
-	conns   map[uint32]*srtConn
-	lock    sync.RWMutex
+	backlog    chan connRequest
+	conns      map[uint32]*srtConn
+	handshakes map[handshakeKey]bool
+	lock       sync.RWMutex
 
 	start time.Time
 
@@ -261,6 +268,7 @@ func Listen(network, address string, config Config) (Listener, error) {
 	}
 
 	ln.conns = make(map[uint32]*srtConn)
+	ln.handshakes = make(map[handshakeKey]bool)
 
 	ln.backlog = make(chan connRequest, 128)
 
@@ -336,6 +344,14 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			break
 		}
 
+		ln.lock.Lock()
+		if _, ok := ln.handshakes[handshakeKey{request.addr, request.socketId}]; ok {
+			ln.lock.Unlock()
+			break
+		}
+		ln.handshakes[handshakeKey{request.addr, request.socketId}] = true
+		ln.lock.Unlock()
+
 		mode := acceptFn(&request)
 		if mode != PUBLISH && mode != SUBSCRIBE {
 			// Figure out the reason
@@ -353,7 +369,7 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		}
 
 		// Create a new socket ID
-		socketId := uint32(time.Since(ln.start).Microseconds())
+		socketId := rand.Uint32()
 
 		// Select the largest TSBPD delay advertised by the caller, but at least 120ms
 		recvTsbpdDelay := uint16(request.config.ReceiverLatency.Milliseconds())
@@ -447,7 +463,10 @@ func (ln *listener) error() error {
 
 func (ln *listener) handleShutdown(socketId uint32) {
 	ln.lock.Lock()
-	delete(ln.conns, socketId)
+	if conn, ok := ln.conns[socketId]; ok {
+		delete(ln.conns, socketId)
+		delete(ln.handshakes, handshakeKey{conn.remoteAddr, conn.peerSocketId})
+	}
 	ln.lock.Unlock()
 }
 

@@ -215,6 +215,10 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		c.onShutdown = func(socketId uint32) {}
 	}
 
+	if c.logger == nil {
+		c.logger = NewLogger(nil)
+	}
+
 	c.nextACKNumber = circular.New(1, packet.MAX_TIMESTAMP)
 	c.ackNumbers = make(map[uint32]time.Time)
 

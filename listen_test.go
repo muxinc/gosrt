@@ -435,3 +435,45 @@ func TestListenAsync(t *testing.T) {
 	ln.Close()
 	listenerWg.Wait()
 }
+
+func TestDuplicateHandshakePackets(t *testing.T) {
+	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
+	require.NoError(t, err)
+
+	var listenerWg sync.WaitGroup
+	listenerWg.Add(1)
+
+	count := 0
+	go func() {
+		defer listenerWg.Done()
+		for {
+			_, _, err := ln.Accept(func(req ConnRequest) ConnType {
+				count += 1
+				return PUBLISH
+			})
+			if err == ErrListenerClosed {
+				return
+			}
+			require.NoError(t, err)
+		}
+	}()
+
+	c := connRequest{
+		addr:      &net.UDPAddr{},
+		start:     time.Now(),
+		socketId:  1,
+		timestamp: 0,
+		config:    DefaultConfig(),
+		handshake: &packet.CIFHandshake{},
+	}
+	ln.(*listener).backlog <- c
+	ln.(*listener).backlog <- c
+	ln.(*listener).backlog <- c
+
+	time.Sleep(100 * time.Millisecond)
+	// Wait for all streams to be connected
+	ln.Close()
+	listenerWg.Wait()
+
+	require.Equal(t, 1, count)
+}
