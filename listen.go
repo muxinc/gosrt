@@ -347,6 +347,9 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		ln.lock.Lock()
 		if _, ok := ln.handshakes[handshakeKey{request.addr, request.socketId}]; ok {
 			ln.lock.Unlock()
+			ln.log("listen", func() string {
+				return fmt.Sprintf("received duplicate handshake packet, addr: %s, socketId: %d", request.addr.String(), request.socketId)
+			})
 			break
 		}
 		ln.handshakes[handshakeKey{request.addr, request.socketId}] = true
