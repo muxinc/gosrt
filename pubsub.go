@@ -31,6 +31,45 @@ type packetReadWriter interface {
 	writePacket(p packet.Packet) error
 }
 
+type ringBuffer struct {
+	buffer []packet.Packet
+	pos    int
+}
+
+func newRingBuffer(size int) *ringBuffer {
+	return &ringBuffer{
+		buffer: make([]packet.Packet, size),
+	}
+}
+
+func (r *ringBuffer) Push(p packet.Packet) {
+	if len(r.buffer) == 0 {
+		p.Decommission()
+		return
+	}
+
+	if r.buffer[r.pos] != nil {
+		// We don't need this packet anymore
+		r.buffer[r.pos].Decommission()
+	}
+
+	r.buffer[r.pos] = p
+	r.pos = (r.pos + 1) % len(r.buffer)
+}
+
+func (r *ringBuffer) DumpTo(w io.Writer) {
+	for i := 0; i < len(r.buffer); i++ {
+		p := r.buffer[(r.pos+i)%len(r.buffer)]
+		if p != nil {
+			if conn, ok := w.(packetReadWriter); ok {
+				conn.writePacket(p)
+			} else {
+				w.Write(p.Data())
+			}
+		}
+	}
+}
+
 // pubSub is an implementation of the PubSub interface
 type pubSub struct {
 	incoming      chan packet.Packet
@@ -41,20 +80,23 @@ type pubSub struct {
 	listeners     map[uint32]chan packet.Packet
 	listenersLock sync.Mutex
 	logger        Logger
+	ringBuffer    *ringBuffer
 }
 
 // PubSubConfig is for configuring a new PubSub
 type PubSubConfig struct {
 	Logger Logger // Optional logger
+	Buffer int    // Optional buffer size, how many packets to buffer
 }
 
 // NewPubSub returns a PubSub. After the publishing connection closed
 // this PubSub can't be used anymore.
 func NewPubSub(config PubSubConfig) PubSub {
 	pb := &pubSub{
-		incoming:  make(chan packet.Packet, 1024),
-		listeners: make(map[uint32]chan packet.Packet),
-		logger:    config.Logger,
+		incoming:   make(chan packet.Packet, 1024),
+		listeners:  make(map[uint32]chan packet.Packet),
+		logger:     config.Logger,
+		ringBuffer: newRingBuffer(config.Buffer),
 	}
 
 	pb.ctx, pb.cancel = context.WithCancel(context.Background())
@@ -90,10 +132,8 @@ func (pb *pubSub) broadcast() {
 					pb.logger.Print("pubsub:error", socketId, 1, func() string { return "broadcast target queue is full" })
 				}
 			}
+			pb.ringBuffer.Push(p)
 			pb.listenersLock.Unlock()
-
-			// We don't need this packet anymore
-			p.Decommission()
 		}
 	}
 }
@@ -146,6 +186,7 @@ func (pb *pubSub) SubscribeData(w io.Writer) error {
 	socketId := rand.Uint32()
 	l := make(chan packet.Packet, 1024)
 	pb.listenersLock.Lock()
+	pb.ringBuffer.DumpTo(w)
 	pb.listeners[socketId] = l
 	pb.listenersLock.Unlock()
 
@@ -186,6 +227,7 @@ func (pb *pubSub) Subscribe(c Conn) error {
 	pb.logger.Print("pubsub:subscribe", socketId, 1, func() string { return "new subscriber" })
 
 	pb.listenersLock.Lock()
+	pb.ringBuffer.DumpTo(c)
 	pb.listeners[socketId] = l
 	pb.listenersLock.Unlock()
 
