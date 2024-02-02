@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"sync"
@@ -352,8 +353,20 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			break
 		}
 
+		ln.lock.Lock()
+		defer ln.lock.Unlock()
+
 		// Create a new socket ID
-		socketId := uint32(time.Since(ln.start).Microseconds())
+		socketId := rand.Uint32()
+
+		// double check the socket id is not already in use
+		if _, ok := ln.conns[socketId]; ok {
+			ln.log("connection:new", func() string {
+				return fmt.Sprintf("Socket ID already in use (%d) %s", socketId, "REJECT")
+			})
+			ln.reject(request, packet.REJ_SYSTEM)
+			break
+		}
 
 		// Select the largest TSBPD delay advertised by the caller, but at least 120ms
 		recvTsbpdDelay := uint16(request.config.ReceiverLatency.Milliseconds())
@@ -416,9 +429,7 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		ln.accept(request)
 
 		// Add the connection to the list of known connections
-		ln.lock.Lock()
 		ln.conns[socketId] = conn
-		ln.lock.Unlock()
 
 		return conn, mode, nil
 	}
@@ -561,6 +572,12 @@ func (ln *listener) reader(ctx context.Context) {
 
 			if !ok {
 				// ignore the packet, we don't know the destination
+				break
+			}
+
+			if p.Header().Addr.String() != conn.RemoteAddr().String() {
+				// ignore the packet, it's not from the expected peer
+				// https://haivision.github.io/srt-rfc/draft-sharabayko-srt.html#name-security-considerations
 				break
 			}
 
