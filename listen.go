@@ -3,9 +3,11 @@ package srt
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math"
+	"math/big"
 	"net"
 	"os"
 	"sync"
@@ -357,7 +359,14 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		defer ln.lock.Unlock()
 
 		// Create a new socket ID
-		socketId := rand.Uint32()
+		// use crypto/rand to make this difficult to guess
+		nBig, err := rand.Int(rand.Reader, big.NewInt(math.MaxUint32))
+		if err != nil {
+			ln.log("connection:new", func() string { return fmt.Sprintf("failed to generate a new socket id: %s", err) })
+			ln.reject(request, packet.REJ_SYSTEM)
+			break
+		}
+		socketId := uint32(nBig.Int64())
 
 		// double check the socket id is not already in use
 		if _, ok := ln.conns[socketId]; ok {
