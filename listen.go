@@ -116,6 +116,9 @@ type ConnRequest interface {
 	// SetRejectionReason sets the rejection reason for the connection. If
 	// no set, REJ_PEER will be used.
 	SetRejectionReason(r RejectionReason)
+
+	// Config returns the negotiated configuration of the connection request
+	Config() Config
 }
 
 // connRequest implements the ConnRequest interface
@@ -167,6 +170,10 @@ func (req *connRequest) SetPassphrase(passphrase string) error {
 
 func (req *connRequest) SetRejectionReason(reason RejectionReason) {
 	req.rejectionReason = reason
+}
+
+func (req *connRequest) Config() Config {
+	return req.config
 }
 
 // ErrListenerClosed is returned when the listener is about to shutdown.
@@ -344,6 +351,23 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			break
 		}
 
+		// Negotiate config parameters from the handshake
+		if request.handshake.Version == 5 {
+			// Set the stream ID from the handshake
+			request.config.StreamId = request.handshake.StreamId
+
+			// Select the largest TSBPD delay advertised by the caller, but at least what we have in our defaults
+			handshakeSendTSBPDDelay := time.Duration(request.handshake.SRTHS.SendTSBPDDelay) * time.Millisecond
+			if handshakeSendTSBPDDelay > request.config.ReceiverLatency {
+				request.config.ReceiverLatency = handshakeSendTSBPDDelay
+			}
+			handshakeRecvTSBPDDelay := time.Duration(request.handshake.SRTHS.RecvTSBPDDelay) * time.Millisecond
+			if handshakeRecvTSBPDDelay > request.config.PeerLatency {
+				request.config.PeerLatency = handshakeRecvTSBPDDelay
+			}
+		}
+
+		// Decide what to do with the connection
 		mode := acceptFn(&request)
 		if mode != PUBLISH && mode != SUBSCRIBE {
 			// Figure out the reason
@@ -382,22 +406,7 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			break
 		}
 
-		// Select the largest TSBPD delay advertised by the caller, but at least 120ms
-		recvTsbpdDelay := uint16(request.config.ReceiverLatency.Milliseconds())
-		sendTsbpdDelay := uint16(request.config.PeerLatency.Milliseconds())
-
-		if request.handshake.Version == 5 {
-			if request.handshake.SRTHS.SendTSBPDDelay > recvTsbpdDelay {
-				recvTsbpdDelay = request.handshake.SRTHS.SendTSBPDDelay
-			}
-
-			if request.handshake.SRTHS.RecvTSBPDDelay > sendTsbpdDelay {
-				sendTsbpdDelay = request.handshake.SRTHS.RecvTSBPDDelay
-			}
-
-			request.config.StreamId = request.handshake.StreamId
-		}
-
+		// Set the passphrase so the connection can decrypt incoming data
 		request.config.Passphrase = request.passphrase
 
 		// Create a new connection
@@ -410,8 +419,8 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			socketId:                    socketId,
 			peerSocketId:                request.handshake.SRTSocketId,
 			tsbpdTimeBase:               uint64(request.timestamp),
-			tsbpdDelay:                  uint64(recvTsbpdDelay) * 1000,
-			peerTsbpdDelay:              uint64(sendTsbpdDelay) * 1000,
+			tsbpdDelay:                  uint64(request.config.ReceiverLatency.Microseconds()),
+			peerTsbpdDelay:              uint64(request.config.PeerLatency.Microseconds()),
 			initialPacketSequenceNumber: request.handshake.InitialPacketSequenceNumber,
 			crypto:                      request.crypto,
 			keyBaseEncryption:           packet.EvenKeyEncrypted,
