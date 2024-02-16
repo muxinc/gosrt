@@ -445,8 +445,8 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 			request.handshake.SRTHS.SRTFlags.REXMITFLG = true
 			request.handshake.SRTHS.SRTFlags.STREAM = false
 			request.handshake.SRTHS.SRTFlags.PACKET_FILTER = false
-			request.handshake.SRTHS.RecvTSBPDDelay = uint16(request.config.PeerLatency.Milliseconds())
-			request.handshake.SRTHS.SendTSBPDDelay = uint16(request.config.ReceiverLatency.Milliseconds())
+			request.handshake.SRTHS.RecvTSBPDDelay = uint16(request.config.ReceiverLatency.Milliseconds())
+			request.handshake.SRTHS.SendTSBPDDelay = uint16(request.config.PeerLatency.Milliseconds())
 		}
 
 		ln.accept(request)

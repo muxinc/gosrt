@@ -249,6 +249,7 @@ func TestListenHSV4(t *testing.T) {
 }
 
 func TestListenHSV5(t *testing.T) {
+	require := require.New(t)
 	start := time.Now()
 
 	lc := net.ListenConfig{
@@ -256,7 +257,7 @@ func TestListenHSV5(t *testing.T) {
 	}
 
 	lp, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:6003")
-	require.NoError(t, err)
+	require.NoError(err)
 
 	pc := lp.(*net.UDPConn)
 
@@ -276,7 +277,7 @@ func TestListenHSV5(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			require.NoError(t, err)
+			require.NoError(err)
 
 			if p.Header().ControlType != packet.CTRLTYPE_HANDSHAKE {
 				continue
@@ -291,14 +292,14 @@ func TestListenHSV5(t *testing.T) {
 	go func() {
 		config := DefaultConfig()
 		config.StreamId = "foobar"
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := Dial("srt", "127.0.0.1:6003?peerlatency=50000000&rcvlatency=60000000", config)
 		if err != nil {
 			if err == ErrClientClosed {
 				return
 			}
-			require.NoError(t, err)
+			require.NoError(err)
 		}
-		require.NotNil(t, conn)
+		require.NotNil(conn)
 
 		conn.Close()
 	}()
@@ -307,13 +308,15 @@ func TestListenHSV5(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+	require.NoError(err)
 
-	require.Equal(t, uint32(4), recvcif.Version)
-	require.Equal(t, uint16(0), recvcif.EncryptionField)
-	require.Equal(t, uint16(2), recvcif.ExtensionField)
-	require.Equal(t, packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
-	require.Empty(t, recvcif.SynCookie)
+	require.Equal(uint32(4), recvcif.Version)
+	require.Equal(uint16(0), recvcif.EncryptionField)
+	require.Equal(uint16(2), recvcif.ExtensionField)
+	require.Equal(uint16(40000), recvcif.SRTHS.RecvTSBPDDelay)
+	require.Equal(uint16(60000), recvcif.SRTHS.SendTSBPDDelay)
+	require.Equal(packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
+	require.Empty(recvcif.SynCookie)
 
 	p.Header().IsControlPacket = true
 	p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
@@ -342,7 +345,7 @@ func TestListenHSV5(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
@@ -350,13 +353,13 @@ func TestListenHSV5(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+	require.NoError(err)
 
-	require.Equal(t, uint32(5), recvcif.Version)
-	require.Equal(t, uint16(0), recvcif.EncryptionField)
-	require.Equal(t, uint16(5), recvcif.ExtensionField)
-	require.Equal(t, packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
-	require.Equal(t, sendcif.SynCookie, recvcif.SynCookie)
+	require.Equal(uint32(5), recvcif.Version)
+	require.Equal(uint16(0), recvcif.EncryptionField)
+	require.Equal(uint16(5), recvcif.ExtensionField)
+	require.Equal(packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
+	require.Equal(sendcif.SynCookie, recvcif.SynCookie)
 
 	p.Header().IsControlPacket = true
 	p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
@@ -377,7 +380,7 @@ func TestListenHSV5(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
