@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -250,6 +251,10 @@ func TestListenHSV4(t *testing.T) {
 }
 
 func TestListenHSV5(t *testing.T) {
+	const (
+		peerLatency = 600 * time.Millisecond
+		recvLatency = 500 * time.Millisecond
+	)
 	start := time.Now()
 
 	lc := net.ListenConfig{
@@ -292,6 +297,8 @@ func TestListenHSV5(t *testing.T) {
 	go func() {
 		config := DefaultConfig()
 		config.StreamId = "foobar"
+		config.PeerLatency = peerLatency
+		config.ReceiverLatency = recvLatency
 		conn, err := Dial("srt", "127.0.0.1:6003", config)
 		if err != nil {
 			if err == ErrClientClosed {
@@ -356,6 +363,9 @@ func TestListenHSV5(t *testing.T) {
 	require.Equal(t, uint32(5), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
 	require.Equal(t, uint16(5), recvcif.ExtensionField)
+	require.NotNil(t, recvcif.SRTHS)
+	require.Equal(t, uint16(peerLatency.Milliseconds()), recvcif.SRTHS.SendTSBPDDelay)
+	require.Equal(t, uint16(recvLatency.Milliseconds()), recvcif.SRTHS.RecvTSBPDDelay)
 	require.Equal(t, packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
 	require.Equal(t, sendcif.SynCookie, recvcif.SynCookie)
 
@@ -383,6 +393,68 @@ func TestListenHSV5(t *testing.T) {
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
 	pc.Close()
+}
+
+func TestListenHSV5_HandshakeCIFs(t *testing.T) {
+	const (
+		peerLatency = 600 * time.Millisecond
+		recvLatency = 500 * time.Millisecond
+		recvCif     = "handshake:recv:cif"
+		sendCif     = "handshake:send:cif"
+	)
+	var (
+		require  = require.New(t)
+		listenWg sync.WaitGroup
+		// Create a logger to capture the handshake CIFs
+		listenLogger = NewLogger([]string{recvCif, sendCif})
+		listenCfg    = DefaultConfig()
+	)
+	// Standup our listener
+	listenCfg.Logger = listenLogger
+	ln, err := Listen("srt", "127.0.0.1:6003", listenCfg)
+	require.NoError(err)
+	listenWg.Add(1)
+	go func() {
+		listenWg.Done()
+		for {
+			_, _, err := ln.Accept(func(req ConnRequest) ConnType { return SUBSCRIBE })
+			if err == ErrListenerClosed {
+				return
+			}
+			require.NoError(err)
+		}
+	}()
+	// Wait until the listener is ready
+	listenWg.Wait()
+
+	// Dial in caller mode with our specified latencies
+	dialCfg := DefaultConfig()
+	dialCfg.StreamId = "foobar"
+	dialCfg.PeerLatency = peerLatency
+	dialCfg.ReceiverLatency = recvLatency
+	conn, err := Dial("srt", "127.0.0.1:6003", dialCfg)
+	require.NoError(err)
+
+	// Shut everything down & close the logger
+	require.NoError(conn.Close())
+	ln.Close()
+	listenLogger.Close()
+
+	// Drain the log channel and validate the handshake CIFs
+	for log := range listenLogger.Listen() {
+		// Only care about the conclusion handshakes
+		if !strings.Contains(log.Message, "CONCLUSION") {
+			continue
+		}
+		switch log.Topic {
+		case recvCif:
+			require.Contains(log.Message, "recvTSBPDDelay: 0x01f4 (500ms)", recvCif)
+			require.Contains(log.Message, "sendTSBPDDelay: 0x0258 (600ms)", recvCif)
+		case sendCif:
+			require.Contains(log.Message, "recvTSBPDDelay: 0x0258 (600ms)", sendCif)
+			require.Contains(log.Message, "sendTSBPDDelay: 0x01f4 (500ms)", sendCif)
+		}
+	}
 }
 
 func TestListenAsync(t *testing.T) {

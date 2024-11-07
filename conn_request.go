@@ -46,6 +46,9 @@ type ConnRequest interface {
 
 	// Reject rejects the request.
 	Reject(r RejectionReason)
+
+	// Config returns the negotiated configuration of the connection request
+	Config() Config
 }
 
 // connRequest implements the ConnRequest interface
@@ -230,6 +233,22 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			return nil
 		}
 
+		// Negotiate config parameters from the handshake
+		if cif.Version == 5 {
+			// Set the stream ID from the handshake
+			config.StreamId = cif.StreamId
+
+			// Select the largest TSBPD delay advertised by the caller, but at least what we have in our defaults
+			handshakeSendTSBPDDelay := time.Duration(cif.SRTHS.SendTSBPDDelay) * time.Millisecond
+			if handshakeSendTSBPDDelay > config.ReceiverLatency {
+				config.ReceiverLatency = handshakeSendTSBPDDelay
+			}
+			handshakeRecvTSBPDDelay := time.Duration(cif.SRTHS.RecvTSBPDDelay) * time.Millisecond
+			if handshakeRecvTSBPDDelay > config.PeerLatency {
+				config.PeerLatency = handshakeRecvTSBPDDelay
+			}
+		}
+
 		req := &connRequest{
 			ln:        ln,
 			addr:      p.Header().Addr,
@@ -315,6 +334,10 @@ func (req *connRequest) SetPassphrase(passphrase string) error {
 
 func (req *connRequest) SetRejectionReason(reason RejectionReason) {
 	req.rejectionReason = reason
+}
+
+func (req *connRequest) Config() Config {
+	return req.config
 }
 
 func (req *connRequest) Reject(reason RejectionReason) {
@@ -405,8 +428,8 @@ func (req *connRequest) Accept() (Conn, error) {
 		socketId:                    socketId,
 		peerSocketId:                req.handshake.SRTSocketId,
 		tsbpdTimeBase:               uint64(req.timestamp),
-		tsbpdDelay:                  uint64(recvTsbpdDelay) * 1000,
-		peerTsbpdDelay:              uint64(sendTsbpdDelay) * 1000,
+		tsbpdDelay:                  uint64(req.config.ReceiverLatency.Microseconds()),
+		peerTsbpdDelay:              uint64(req.config.PeerLatency.Microseconds()),
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
@@ -431,8 +454,8 @@ func (req *connRequest) Accept() (Conn, error) {
 		req.handshake.SRTHS.SRTFlags.REXMITFLG = true
 		req.handshake.SRTHS.SRTFlags.STREAM = false
 		req.handshake.SRTHS.SRTFlags.PACKET_FILTER = false
-		req.handshake.SRTHS.RecvTSBPDDelay = recvTsbpdDelay
-		req.handshake.SRTHS.SendTSBPDDelay = sendTsbpdDelay
+		req.handshake.SRTHS.RecvTSBPDDelay = uint16(req.config.ReceiverLatency.Milliseconds())
+		req.handshake.SRTHS.SendTSBPDDelay = uint16(req.config.PeerLatency.Milliseconds())
 	}
 
 	p := packet.NewPacket(req.addr)
