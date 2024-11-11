@@ -114,6 +114,14 @@ type Listener interface {
 	Addr() net.Addr
 }
 
+// requestIdentifier uniquely identifies a connection request by the source address
+// and source SRT socket id. It is used to ensure that multiple handshake packets
+// from a single connection are de-duplicated.
+type requestIdentifier struct {
+	addr     string
+	socketId uint32
+}
+
 // listener implements the Listener interface.
 type listener struct {
 	pc   *net.UDPConn
@@ -121,10 +129,14 @@ type listener struct {
 
 	config Config
 
-	backlog  chan packet.Packet
-	connReqs map[uint32]*connRequest
-	conns    map[uint32]*srtConn
-	lock     sync.RWMutex
+	backlog chan packet.Packet
+
+	// Maps peer connection requestIdentifier to connection requests for all in-progress handshakes
+	// AND established connections
+	connReqs map[requestIdentifier]*connRequest
+	// Maps socket ids to established connection
+	conns map[uint32]*srtConn
+	lock  sync.RWMutex
 
 	start time.Time
 
@@ -190,7 +202,7 @@ func Listen(network, address string, config Config) (Listener, error) {
 		return nil, fmt.Errorf("listen: no local address")
 	}
 
-	ln.connReqs = make(map[uint32]*connRequest)
+	ln.connReqs = make(map[requestIdentifier]*connRequest)
 	ln.conns = make(map[uint32]*srtConn)
 
 	ln.backlog = make(chan packet.Packet, 128)
