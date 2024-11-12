@@ -276,9 +276,10 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		}
 
 		ln.lock.Lock()
-		_, exists := ln.connReqs[cif.SRTSocketId]
+		reqId := req.getRequestIdentifier()
+		_, exists := ln.connReqs[reqId]
 		if !exists {
-			ln.connReqs[cif.SRTSocketId] = req
+			ln.connReqs[reqId] = req
 		}
 		ln.lock.Unlock()
 
@@ -297,6 +298,10 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 	}
 
 	return nil
+}
+
+func (req *connRequest) getRequestIdentifier() requestIdentifier {
+	return requestIdentifier{addr: req.addr.String(), socketId: req.socketId}
 }
 
 func (req *connRequest) RemoteAddr() net.Addr {
@@ -344,7 +349,7 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	req.ln.lock.Lock()
 	defer req.ln.lock.Unlock()
 
-	if _, hasReq := req.ln.connReqs[req.socketId]; !hasReq {
+	if _, hasReq := req.ln.connReqs[req.getRequestIdentifier()]; !hasReq {
 		return
 	}
 
@@ -361,7 +366,7 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	req.ln.log("handshake:send:cif", func() string { return req.handshake.String() })
 	req.ln.send(p)
 
-	delete(req.ln.connReqs, req.socketId)
+	delete(req.ln.connReqs, req.getRequestIdentifier())
 }
 
 // generateSocketId generates an SRT SocketID that can be used for this connection
@@ -390,7 +395,7 @@ func (req *connRequest) Accept() (Conn, error) {
 	req.ln.lock.Lock()
 	defer req.ln.lock.Unlock()
 
-	if _, hasReq := req.ln.connReqs[req.socketId]; !hasReq {
+	if _, hasReq := req.ln.connReqs[req.getRequestIdentifier()]; !hasReq {
 		return nil, fmt.Errorf("connection already accepted")
 	}
 
@@ -434,7 +439,7 @@ func (req *connRequest) Accept() (Conn, error) {
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
 		onSend:                      req.ln.send,
-		onShutdown:                  req.ln.handleShutdown,
+		onShutdown:                  req.handleShutdown,
 		logger:                      req.config.Logger,
 	})
 
@@ -471,7 +476,26 @@ func (req *connRequest) Accept() (Conn, error) {
 	req.ln.send(p)
 
 	req.ln.conns[socketId] = conn
-	delete(req.ln.connReqs, req.socketId)
 
 	return conn, nil
+}
+
+func (req *connRequest) handleShutdown(socketId uint32) {
+	// Once this connection has shut down, we no longer need to keep track of
+	// connections from this peer socketId
+	req.ln.lock.Lock()
+
+	reqId := req.getRequestIdentifier()
+	if _, hasReq := req.ln.connReqs[reqId]; !hasReq {
+		req.ln.lock.Unlock()
+		return
+	}
+	delete(req.ln.connReqs, reqId)
+	req.ln.lock.Unlock()
+
+	// Forward to the listener to handle shutdown for this socketId (note that this isn't
+	// the same as req.socketId!)
+	req.ln.handleShutdown(socketId)
+
+	return
 }
