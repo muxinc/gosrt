@@ -601,6 +601,14 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 	pivot := data[48:]
 
 	for {
+		// Each extension starts with a 4 byte header (2 byte type, 2 byte length).
+		// A well formed handshake consumes the extension area exactly, so fewer
+		// than 4 bytes left here means the peer sent a truncated extension. Reject
+		// it rather than reading past the end of the buffer.
+		if len(pivot) < 4 {
+			return fmt.Errorf("invalid extension header, %d trailing byte(s)", len(pivot))
+		}
+
 		extensionType := CtrlSubType(binary.BigEndian.Uint16(pivot[0:]))
 		extensionLength := int(binary.BigEndian.Uint16(pivot[2:])) * 4
 
