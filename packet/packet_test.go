@@ -2,7 +2,9 @@ package packet
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -227,6 +229,131 @@ func TestHandshakeV5(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
+}
+
+// conclusionHandshakeWithHSExtension returns the wire bytes of a well formed
+// HSv5 CONCLUSION handshake carrying a single handshake extension: 48 bytes of
+// handshake, a 4 byte extension header, and the 12 byte extension itself.
+func conclusionHandshakeWithHSExtension(t *testing.T) []byte {
+	t.Helper()
+
+	ip := srtnet.IP{}
+	ip.Parse("127.0.0.1")
+
+	cif := &CIFHandshake{
+		IsRequest:                   true,
+		Version:                     5,
+		InitialPacketSequenceNumber: circular.New(42, MAX_SEQUENCENUMBER),
+		MaxTransmissionUnitSize:     1500,
+		MaxFlowWindowSize:           100,
+		HandshakeType:               HSTYPE_CONCLUSION,
+		SRTSocketId:                 0x274921,
+		SynCookie:                   0x123456,
+		PeerIP:                      ip,
+		HasHS:                       true,
+		SRTHS: &CIFHandshakeExtension{
+			SRTVersion:     0x010402,
+			RecvTSBPDDelay: 100,
+			SendTSBPDDelay: 100,
+		},
+	}
+
+	var buf bytes.Buffer
+
+	cif.Marshal(&buf)
+
+	require.Len(t, buf.Bytes(), 48+4+12)
+
+	return buf.Bytes()
+}
+
+// TestHandshakeTruncatedExtension covers a CONCLUSION handshake whose extension
+// area ends in the middle of an extension header. The extension loop used to
+// read the 4 byte header without checking what was left in the buffer, so 1 to 3
+// trailing bytes read past the end and panicked. The handshake is parsed before
+// the SYN cookie is verified, which made a single unauthenticated UDP packet
+// enough to take down a listener.
+func TestHandshakeTruncatedExtension(t *testing.T) {
+	base := conclusionHandshakeWithHSExtension(t)
+
+	// The untruncated handshake must still parse, so we know the cases below
+	// fail for the reason we think they do.
+	require.NoError(t, (&CIFHandshake{}).Unmarshal(base))
+
+	for _, trailing := range []int{1, 2, 3} {
+		// The extension area is cut short before the first extension header.
+		t.Run(fmt.Sprintf("truncated first extension header, %d byte(s)", trailing), func(t *testing.T) {
+			err := (&CIFHandshake{}).Unmarshal(base[:48+trailing])
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "invalid extension header")
+		})
+
+		// A complete extension followed by a partial extension header. This
+		// reaches the same read through the loop's continuation branch, so it
+		// needs its own case.
+		t.Run(fmt.Sprintf("trailing bytes after a complete extension, %d byte(s)", trailing), func(t *testing.T) {
+			data := append(append([]byte{}, base...), make([]byte, trailing)...)
+
+			err := (&CIFHandshake{}).Unmarshal(data)
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "invalid extension header")
+		})
+	}
+}
+
+// conclusionHandshakeHeader returns the 48 byte prefix of a CONCLUSION
+// handshake with the extension field forced to extensionField, so a caller can
+// append hand built extension bytes. Marshal clears the extension field unless
+// one of the Has* flags is set, hence patching it directly.
+func conclusionHandshakeHeader(t *testing.T, extensionField uint16) []byte {
+	t.Helper()
+
+	data := append([]byte{}, conclusionHandshakeWithHSExtension(t)[:48]...)
+	binary.BigEndian.PutUint16(data[6:], extensionField)
+
+	return data
+}
+
+// TestHandshakeKeyMaterialBounds records that this is not CVE-2026-55869, the
+// libsrt KMREQ heap overflow. Our key material parser checks the declared
+// extension length against what is actually in the buffer and validates the
+// body, so a payload of that shape is rejected rather than read out of bounds.
+func TestHandshakeKeyMaterialBounds(t *testing.T) {
+	const extensionFieldKM = 2
+
+	t.Run("declared length longer than the buffer", func(t *testing.T) {
+		data := conclusionHandshakeHeader(t, extensionFieldKM)
+
+		// Extension header claiming 8 words (32 bytes) of key material...
+		header := make([]byte, 4)
+		binary.BigEndian.PutUint16(header[0:], EXTTYPE_KMREQ.Value())
+		binary.BigEndian.PutUint16(header[2:], 8)
+
+		// ...followed by only 4 bytes of it.
+		data = append(append(data, header...), make([]byte, 4)...)
+
+		err := (&CIFHandshake{}).Unmarshal(data)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid extension length")
+	})
+
+	t.Run("declared length matches but the body is garbage", func(t *testing.T) {
+		data := conclusionHandshakeHeader(t, extensionFieldKM)
+
+		header := make([]byte, 4)
+		binary.BigEndian.PutUint16(header[0:], EXTTYPE_KMREQ.Value())
+		binary.BigEndian.PutUint16(header[2:], 4)
+
+		data = append(append(data, header...), make([]byte, 16)...)
+
+		err := (&CIFHandshake{}).Unmarshal(data)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "CIFKeyMaterialExtension")
+	})
 }
 
 func TestHandshakeString(t *testing.T) {
