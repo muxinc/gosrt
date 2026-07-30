@@ -275,13 +275,18 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			req.crypto = cr
 		}
 
-		ln.lock.Lock()
+		// Built before taking the lock: it only reads fields fixed at construction,
+		// and a panic while holding this lock would never release it, wedging the
+		// listener's reader along with every other accept.
 		reqId := req.getRequestIdentifier()
+
+		ln.lock.Lock()
+		defer ln.lock.Unlock()
+
 		_, exists := ln.connReqs[reqId]
 		if !exists {
 			ln.connReqs[reqId] = req
 		}
-		ln.lock.Unlock()
 
 		// we received a duplicate request: reject silently
 		if exists {
@@ -481,11 +486,16 @@ func (req *connRequest) Accept() (Conn, error) {
 }
 
 func (req *connRequest) handleShutdown(socketId uint32) {
+	// Built before taking the lock, as in newConnRequest: it only reads fields
+	// fixed at construction.
+	reqId := req.getRequestIdentifier()
+
 	// Once this connection has shut down, we no longer need to keep track of
 	// connections from this peer socketId
+	//
+	// Not deferred: the listener call below takes this same lock.
 	req.ln.lock.Lock()
 
-	reqId := req.getRequestIdentifier()
 	if _, hasReq := req.ln.connReqs[reqId]; !hasReq {
 		req.ln.lock.Unlock()
 		return
