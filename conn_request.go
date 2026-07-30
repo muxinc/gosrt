@@ -275,13 +275,14 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			req.crypto = cr
 		}
 
-		ln.lock.Lock()
 		reqId := req.getRequestIdentifier()
+
+		ln.lock.Lock()
+		defer ln.lock.Unlock()
 		_, exists := ln.connReqs[reqId]
 		if !exists {
 			ln.connReqs[reqId] = req
 		}
-		ln.lock.Unlock()
 
 		// we received a duplicate request: reject silently
 		if exists {
@@ -481,11 +482,12 @@ func (req *connRequest) Accept() (Conn, error) {
 }
 
 func (req *connRequest) handleShutdown(socketId uint32) {
+	reqId := req.getRequestIdentifier()
+
 	// Once this connection has shut down, we no longer need to keep track of
 	// connections from this peer socketId
 	req.ln.lock.Lock()
 
-	reqId := req.getRequestIdentifier()
 	if _, hasReq := req.ln.connReqs[reqId]; !hasReq {
 		req.ln.lock.Unlock()
 		return
